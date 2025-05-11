@@ -233,6 +233,23 @@ npm install axios
     <input v-model="email" placeholder="Email" />
     <input v-model="password" placeholder="密碼" />
     <button @click="createUser">送出</button>
+
+        <!-- 新增貼文區塊 -->
+    <h2 style="margin-top: 30px">新增貼文</h2>
+    <input v-model="postUserId" placeholder="使用者 ID" />
+    <input v-model="postContent" placeholder="貼文內容" />
+    <button @click="createPost">送出</button>
+
+    <h2 style="margin-top: 30px">貼文列表</h2>
+    <ul>
+      <li v-for="post in posts" :key="post.post_id">
+        🧑 使用者 ID：{{ post.user_id }}<br />
+        ✏️ 內容：{{ post.content }}<br />
+        🕒 建立時間：{{ new Date(post.createdAt).toLocaleString() }}
+        <hr />
+      </li>
+    </ul>
+
   </div>
 </template>
 
@@ -244,10 +261,18 @@ import axios from 'axios'
 // 所有使用者清單（陣列）
 const users = ref([])
 
+// 所有貼文（陣列）
+const posts = ref([])
+
 // 新增使用者的輸入欄位
 const name = ref('')
 const email = ref('')
 const password = ref('')
+
+// 新增貼文的欄位
+const user_id = ref('')
+const content = ref('')
+const creatd_at = ref('')
 
 // 編輯狀態與欄位
 const editingUserId = ref(null)
@@ -257,9 +282,10 @@ const editPassword = ref('')
 
 // 畫面初始化時呼叫，取得所有使用者
 const fetchUsers = async () => {
-  const res = await axios.get('http://localhost:8080/users') // 向後端發 GET 請求
-  users.value = res.data // 將回傳資料塞入 users，畫面會自動更新
+  const res = await axios.get('http://localhost:8080/users')
+  users.value = res.data
 }
+
 
 // 畫面掛載（第一次開啟）時呼叫 fetchUsers
 onMounted(fetchUsers)
@@ -271,11 +297,10 @@ const createUser = async () => {
     email: email.value,
     password: password.value
   })
-  // 清空表單
   name.value = ''
   email.value = ''
   password.value = ''
-  fetchUsers() // 重新取得資料
+  fetchUsers()
 }
 
 // 開始編輯某一筆資料（帶入原本值）
@@ -310,6 +335,37 @@ const deleteUser = async (id) => {
   await axios.delete(`http://localhost:8080/users/${id}`)
   fetchUsers()
 }
+
+
+
+// 新增貼文的欄位
+const postUserId = ref('')
+const postContent = ref('')
+
+// 取得所有貼文
+const fetchPosts = async () => {
+  const res = await axios.get('http://localhost:8080/posts')
+  posts.value = res.data
+}
+
+// 建立貼文
+const createPost = async () => {
+  await axios.post('http://localhost:8080/posts', {
+    user_id: postUserId.value,
+    content: postContent.value
+  })
+  postUserId.value = ''
+  postContent.value = ''
+  fetchPosts()
+}
+
+// 畫面初始化時一併取得貼文
+onMounted(() => {
+  fetchUsers()
+  fetchPosts()
+})
+
+
 </script>
 
 

@@ -1,0 +1,1477 @@
+加密
+
+步驟1.
+JWT認證和密碼加密功能，首先需要添加相關依賴。然後實作以下幾個類：
+首先需要在pom.xml中添加JWT和Spring Security依賴：
+
+<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>io.jsonwebtoken</groupId>
+			<artifactId>jjwt-api</artifactId>
+			<version>0.11.5</version>
+		</dependency>
+		<dependency>
+			<groupId>io.jsonwebtoken</groupId>
+			<artifactId>jjwt-impl</artifactId>
+			<version>0.11.5</version>
+			<scope>runtime</scope>
+		</dependency>
+		<dependency>
+			<groupId>io.jsonwebtoken</groupId>
+			<artifactId>jjwt-jackson</artifactId>
+			<version>0.11.5</version>
+			<scope>runtime</scope>
+		</dependency>
+
+步驟2.
+首先創建安全配置類
+package com.example.demo.config;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+
+import com.example.demo.security.JwtAuthenticationFilter;
+
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+
+    @Autowired
+    private JwtAuthenticationFilter jwtAuthFilter;
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+                .csrf(csrf -> csrf.disable())
+                .authorizeHttpRequests(auth -> auth
+                        .requestMatchers("/api/auth/**").permitAll()
+                        .anyRequest().authenticated())
+                .sessionManagement(session -> session
+                        .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+
+        return http.build();
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+
+    @Bean
+    public AuthenticationManager authenticationManager(AuthenticationConfiguration config) throws Exception {
+        return config.getAuthenticationManager();
+    }
+}
+
+步驟3.JwtUtil 類
+package com.example.demo.security;
+
+import io.jsonwebtoken.Claims;
+import io.jsonwebtoken.Jwts;
+import io.jsonwebtoken.SignatureAlgorithm;
+import io.jsonwebtoken.security.Keys;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.stereotype.Component;
+
+import java.nio.charset.StandardCharsets;
+import java.security.Key;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.function.Function;
+
+@Component
+public class JwtUtil {
+
+    @Value("${jwt.secret:默認密鑰需要更長一些以滿足安全要求}")
+    private String secret;
+
+    @Value("${jwt.expiration:86400000}")
+    private long expiration; // 默認24小時
+
+    private Key getSigningKey() {
+        byte[] keyBytes = secret.getBytes(StandardCharsets.UTF_8);
+        return Keys.hmacShaKeyFor(keyBytes);
+    }
+
+    public String extractUsername(String token) {
+        return extractClaim(token, Claims::getSubject);
+    }
+
+    public Date extractExpiration(String token) {
+        return extractClaim(token, Claims::getExpiration);
+    }
+
+    public <T> T extractClaim(String token, Function<Claims, T> claimsResolver) {
+        final Claims claims = extractAllClaims(token);
+        return claimsResolver.apply(claims);
+    }
+
+    private Claims extractAllClaims(String token) {
+        return Jwts.parserBuilder()
+                .setSigningKey(getSigningKey())
+                .build()
+                .parseClaimsJws(token)
+                .getBody();
+    }
+
+    private Boolean isTokenExpired(String token) {
+        return extractExpiration(token).before(new Date());
+    }
+
+    public String generateToken(UserDetails userDetails) {
+        Map<String, Object> claims = new HashMap<>();
+        return createToken(claims, userDetails.getUsername());
+    }
+
+    private String createToken(Map<String, Object> claims, String subject) {
+        return Jwts.builder()
+                .setClaims(claims)
+                .setSubject(subject)
+                .setIssuedAt(new Date(System.currentTimeMillis()))
+                .setExpiration(new Date(System.currentTimeMillis() + expiration))
+                .signWith(getSigningKey(), SignatureAlgorithm.HS256)
+                .compact();
+    }
+
+    public Boolean validateToken(String token, UserDetails userDetails) {
+        final String username = extractUsername(token);
+        return (username.equals(userDetails.getUsername()) && !isTokenExpired(token));
+    }
+}
+
+步驟4.創建 JWT 認證過濾器：
+package com.example.demo.security;
+
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import java.io.IOException;
+
+@Component
+public class JwtAuthenticationFilter extends OncePerRequestFilter {
+
+    @Autowired
+    private JwtUtil jwtUtil;
+
+    @Autowired
+    private UserDetailsService userDetailsService;
+
+    @Override
+    protected void doFilterInternal(
+            HttpServletRequest request,
+            HttpServletResponse response,
+            FilterChain filterChain) throws ServletException, IOException {
+        final String authHeader = request.getHeader("Authorization");
+        final String jwt;
+        final String userEmail;
+
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            filterChain.doFilter(request, response);
+            return;
+        }
+
+        jwt = authHeader.substring(7);
+        userEmail = jwtUtil.extractUsername(jwt);
+
+        if (userEmail != null && SecurityContextHolder.getContext().getAuthentication() == null) {
+            UserDetails userDetails = this.userDetailsService.loadUserByUsername(userEmail);
+            if (jwtUtil.validateToken(jwt, userDetails)) {
+                UsernamePasswordAuthenticationToken authToken = new UsernamePasswordAuthenticationToken(
+                        userDetails,
+                        null,
+                        userDetails.getAuthorities());
+                authToken.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+                SecurityContextHolder.getContext().setAuthentication(authToken);
+            }
+        }
+        filterChain.doFilter(request, response);
+    }
+}
+
+步驟5.創建UserDetailsService實現：
+package com.example.demo.security;
+
+import com.example.demo.model.User;
+import com.example.demo.repository.UserRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
+import org.springframework.stereotype.Service;
+
+import java.util.Collections;
+
+@Service
+public class CustomUserDetailsService implements UserDetailsService {
+
+    @Autowired
+    private UserRepository userRepository;
+
+    @Override
+    public UserDetails loadUserByUsername(String email) throws UsernameNotFoundException {
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new UsernameNotFoundException("找不到使用者: " + email));
+
+        return new org.springframework.security.core.userdetails.User(
+                user.getEmail(),
+                user.getPassword(),
+                Collections.singletonList(new SimpleGrantedAuthority("ROLE_" + user.getRole())));
+    }
+}
+
+步驟6.修改UserRepository添加findByEmail方法：
+package com.example.demo.repository;
+
+import com.example.demo.model.User;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.Optional;
+
+//定義介面 繼承JPA的Repository
+public interface UserRepository extends JpaRepository<User, Long> {
+    Optional<User> findByEmail(String email);
+}
+
+步驟7.創建認證服務：
+
+package com.example.demo.service;
+
+import com.example.demo.model.User;
+import com.example.demo.repository.UserRepository;
+import com.example.demo.security.JwtUtil;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.stereotype.Service;
+
+@Service
+public class AuthService {
+
+    @Autowired
+    private UserRepository userRepository;
+
+    @Autowired
+    private PasswordEncoder passwordEncoder;
+
+    @Autowired
+    private JwtUtil jwtUtil;
+
+    @Autowired
+    private AuthenticationManager authenticationManager;
+
+    @Autowired
+    private UserDetailsService userDetailsService;
+
+    public String register(User user) {
+        // 檢查email是否已存在
+        if (userRepository.findByEmail(user.getEmail()).isPresent()) {
+            throw new RuntimeException("該電子信箱已被註冊");
+        }
+
+        // 加密密碼
+        user.setPassword(passwordEncoder.encode(user.getPassword()));
+
+        // 保存用戶
+        userRepository.save(user);
+
+        // 生成JWT令牌
+        UserDetails userDetails = userDetailsService.loadUserByUsername(user.getEmail());
+        return jwtUtil.generateToken(userDetails);
+    }
+
+    public String login(String email, String password) {
+        // 驗證用戶憑證
+        authenticationManager.authenticate(
+                new UsernamePasswordAuthenticationToken(email, password));
+
+        // 生成JWT令牌
+        UserDetails userDetails = userDetailsService.loadUserByUsername(email);
+        return jwtUtil.generateToken(userDetails);
+    }
+}
+
+
+步驟8.創建認證控制器：
+package com.example.demo.controller;
+
+import com.example.demo.model.User;
+import com.example.demo.service.AuthService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.HashMap;
+import java.util.Map;
+
+@RestController
+@RequestMapping("/api/auth")
+public class AuthController {
+
+    @Autowired
+    private AuthService authService;
+
+    @PostMapping("/register")
+    public ResponseEntity<?> register(@RequestBody User user) {
+        try {
+            String token = authService.register(user);
+            Map<String, String> response = new HashMap<>();
+            response.put("token", token);
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            Map<String, String> errorResponse = new HashMap<>();
+            errorResponse.put("error", e.getMessage());
+            return ResponseEntity.badRequest().body(errorResponse);
+        }
+    }
+
+    @PostMapping("/login")
+    public ResponseEntity<?> login(@RequestBody Map<String, String> loginRequest) {
+        try {
+            String email = loginRequest.get("email");
+            String password = loginRequest.get("password");
+            String token = authService.login(email, password);
+            Map<String, String> response = new HashMap<>();
+            response.put("token", token);
+            return ResponseEntity.ok(response);
+        } catch (Exception e) {
+            Map<String, String> errorResponse = new HashMap<>();
+            errorResponse.put("error", "認證失敗：" + e.getMessage());
+            return ResponseEntity.badRequest().body(errorResponse);
+        }
+    }
+}
+
+步驟9. 在application.properties中添加JWT配置：
+
+# JWT配置
+jwt.secret=7DwAPKpz9h2wR4fVkRuNnGtWYT7A5LSBq8Xe3vDFGJjsUQZXyYRPLnHMTcVb
+jwt.expiration=86400000
+
+10.修改user表
+
+package com.example.demo.model;
+
+import jakarta.persistence.*;
+
+@Entity
+@Table(name = "users")
+public class User {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private String name;
+
+    @Column(unique = true)
+    private String email;
+
+    private String password;
+
+    private String role = "USER"; // 默認角色
+
+    // getters and setters
+    public Long getId() {
+        return id;
+    }
+
+    public void setId(Long id) {
+        this.id = id;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public String getEmail() {
+        return email;
+    }
+
+    public void setEmail(String email) {
+        this.email = email;
+    }
+
+    public String getPassword() {
+        return password;
+    }
+
+    public void setPassword(String password) {
+        this.password = password;
+    }
+
+    public String getRole() {
+        return role;
+    }
+
+    public void setRole(String role) {
+        this.role = role;
+    }
+
+}
+
+
+11.測試login/register
+{
+  "name": "測試用戶",
+  "email": "test@example.com",
+  "password": "password123"
+}
+
+{
+  "email": "test@example.com",
+  "password": "password123"
+}
+
+
+12.串前端
+12-1.建了全局CORS配置，允許來自前端跨域請求。
+
+package com.example.demo.config;
+
+import org.springframework.context.annotation.Configuration;
+import org.springframework.web.servlet.config.annotation.CorsRegistry;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
+
+@Configuration
+public class WebConfig implements WebMvcConfigurer {
+
+    @Override
+    public void addCorsMappings(CorsRegistry registry) {
+        registry.addMapping("/**")
+                .allowedOrigins("http://localhost:5173") // 前端應用的源
+                .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
+                .allowedHeaders("*")
+                .allowCredentials(true);
+    }
+}
+
+
+12-2
+修改SecurityConfig類：修改了Spring Security配置，添加了CORS支持，確保安全過濾器不會阻止預檢(preflight)請求。
+
+package com.example.demo.config;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+
+import com.example.demo.security.JwtAuthenticationFilter;
+
+import java.util.Arrays;
+
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+
+    @Autowired
+    private JwtAuthenticationFilter jwtAuthFilter;
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+                .cors(cors -> cors.configurationSource(corsConfigurationSource()))
+                .csrf(csrf -> csrf.disable())
+                .authorizeHttpRequests(auth -> auth
+                        .requestMatchers("/api/auth/**").permitAll()
+.requestMatchers("/users/**").permitAll()
+                        .requestMatchers("/posts/**").permitAll()
+                        .anyRequest().authenticated())
+                .sessionManagement(session -> session
+                        .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+
+        return http.build();
+    }
+
+    @Bean
+    public CorsConfigurationSource corsConfigurationSource() {
+        CorsConfiguration configuration = new CorsConfiguration();
+        configuration.setAllowedOrigins(Arrays.asList("http://localhost:5173"));
+        configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS"));
+        configuration.setAllowedHeaders(Arrays.asList("Authorization", "Content-Type", "X-Requested-With"));
+        configuration.setAllowCredentials(true);
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/**", configuration);
+        return source;
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+
+    @Bean
+    public AuthenticationManager authenticationManager(AuthenticationConfiguration config) throws Exception {
+        return config.getAuthenticationManager();
+    }
+}
+
+
+修改前端
+
+<template>
+  <div style="padding: 20px">
+    <!-- 註冊與登入區塊 -->
+    <h2 style="margin-top: 30px">用戶註冊</h2>
+    <input v-model="registerName" placeholder="姓名" />
+    <input v-model="registerEmail" placeholder="Email" />
+    <input v-model="registerPassword" placeholder="密碼" />
+    <button @click="register">註冊</button>
+    
+    <h2 style="margin-top: 30px">用戶登入</h2>
+    <input v-model="loginEmail" placeholder="Email" />
+    <input v-model="loginPassword" placeholder="密碼" />
+    <button @click="login">登入</button>
+    
+    <div v-if="authToken" style="margin-top: 15px; padding: 10px; background-color: #f0f0f0; border-radius: 5px;">
+      <p>已登入成功！</p>
+      <p>Token: {{ authToken.substring(0, 20) }}...</p>
+      <button @click="logout">登出</button>
+    </div>
+
+    <h1>使用者清單</h1>
+    <ul>
+      <!-- v-for 迴圈渲染每個使用者 -->
+      <li v-for="user in users" :key="user.id">
+        <!-- 若該使用者正在編輯，顯示輸入框 -->
+        <template v-if="editingUserId === user.id">
+          <input v-model="editName" placeholder="姓名" />
+          <input v-model="editEmail" placeholder="Email" />
+          <input v-model="editPassword" placeholder="密碼" />
+          <button @click="updateUser(user.id)">儲存</button>
+          <button @click="cancelEdit">取消</button>
+        </template>
+        <!-- 否則顯示一般資訊與操作按鈕 -->
+        <template v-else>
+          {{ user.name }} - {{ user.email }}
+          <button @click="startEdit(user)">編輯</button>
+          <button @click="deleteUser(user.id)">刪除</button>
+        </template>
+      </li>
+    </ul>
+
+    <!-- 新增使用者區塊 -->
+    <h2 style="margin-top: 30px">新增使用者</h2>
+    <input v-model="name" placeholder="姓名" />
+    <input v-model="email" placeholder="Email" />
+    <input v-model="password" placeholder="密碼" />
+    <button @click="createUser">送出</button>
+
+    <!-- 新增貼文區塊 -->
+    <h2 style="margin-top: 30px">新增貼文</h2>
+    <input v-model="postUserId" placeholder="使用者 ID" />
+    <input v-model="postContent" placeholder="貼文內容" />
+    <button @click="createPost">送出</button>
+
+    <h2 style="margin-top: 30px">貼文列表</h2>
+    <ul>
+      <li v-for="post in posts" :key="post.post_id">
+        🧑 使用者 ID：{{ post.user_id }}<br />
+        ✏️ 內容：{{ post.content }}<br />
+        🕒 建立時間：{{ new Date(post.createdAt).toLocaleString() }}
+        <hr />
+      </li>
+    </ul>
+
+  </div>
+</template>
+
+<script setup>
+// 引入 Vue 的工具函式與 axios
+import { ref, onMounted } from 'vue'
+import axios from 'axios'
+
+// JWT認證相關
+const registerName = ref('')
+const registerEmail = ref('')
+const registerPassword = ref('')
+const loginEmail = ref('')
+const loginPassword = ref('')
+const authToken = ref('')
+
+// 註冊用戶
+const register = async () => {
+  try {
+    const res = await axios.post('http://localhost:8080/api/auth/register', {
+      name: registerName.value,
+      email: registerEmail.value,
+      password: registerPassword.value
+    })
+    authToken.value = res.data.token
+    // 清空輸入欄位
+    registerName.value = ''
+    registerEmail.value = ''
+    registerPassword.value = ''
+    
+    // 設置後續請求的授權頭
+    axios.defaults.headers.common['Authorization'] = `Bearer ${authToken.value}`
+    console.log('設置的Authorization頭:', `Bearer ${authToken.value}`)
+    
+    // 更新資料
+    fetchUsers()
+    fetchPosts()
+  } catch (error) {
+    alert('註冊失敗：' + (error.response?.data?.error || error.message))
+  }
+}
+
+// 用戶登入
+const login = async () => {
+  try {
+    const res = await axios.post('http://localhost:8080/api/auth/login', {
+      email: loginEmail.value,
+      password: loginPassword.value
+    })
+    authToken.value = res.data.token
+    // 清空輸入欄位
+    loginEmail.value = ''
+    loginPassword.value = ''
+    
+    // 設置後續請求的授權頭
+    axios.defaults.headers.common['Authorization'] = `Bearer ${authToken.value}`
+    
+    // 更新資料
+    fetchUsers()
+    fetchPosts()
+  } catch (error) {
+    alert('登入失敗：' + (error.response?.data?.error || error.message))
+  }
+}
+
+// 登出功能
+const logout = () => {
+  authToken.value = ''
+  // 移除授權頭
+  delete axios.defaults.headers.common['Authorization']
+}
+
+// 所有使用者清單（陣列）
+const users = ref([])
+
+// 所有貼文（陣列）
+const posts = ref([])
+
+// 新增使用者的輸入欄位
+const name = ref('')
+const email = ref('')
+const password = ref('')
+
+// 新增貼文的欄位
+const user_id = ref('')
+const content = ref('')
+const creatd_at = ref('')
+
+// 編輯狀態與欄位
+const editingUserId = ref(null)
+const editName = ref('')
+const editEmail = ref('')
+const editPassword = ref('')
+
+// 畫面初始化時呼叫，取得所有使用者
+const fetchUsers = async () => {
+  try {
+    // 確保每次請求都帶上最新的令牌
+    if (authToken.value) {
+      axios.defaults.headers.common['Authorization'] = `Bearer ${authToken.value}`
+    }
+
+    const res = await axios.get('http://localhost:8080/users')
+    users.value = res.data
+    console.log('獲取用戶成功:', res.data)
+  } catch (error) {
+    console.error('獲取使用者列表失敗', error)
+    if (error.response?.status === 403) {
+      console.log('授權失敗，當前令牌:', authToken.value)
+    }
+  }
+}
+
+// 畫面掛載（第一次開啟）時呼叫 fetchUsers
+onMounted(fetchUsers)
+
+// 建立使用者（發送 POST）
+const createUser = async () => {
+  await axios.post('http://localhost:8080/users', {
+    name: name.value,
+    email: email.value,
+    password: password.value
+  })
+  name.value = ''
+  email.value = ''
+  password.value = ''
+  fetchUsers()
+}
+
+// 開始編輯某一筆資料（帶入原本值）
+const startEdit = (user) => {
+  editingUserId.value = user.id
+  editName.value = user.name
+  editEmail.value = user.email
+  editPassword.value = user.password
+}
+
+// 取消編輯（清空暫存與狀態）
+const cancelEdit = () => {
+  editingUserId.value = null
+  editName.value = ''
+  editEmail.value = ''
+  editPassword.value = ''
+}
+
+// 更新使用者（發送 PUT）
+const updateUser = async (id) => {
+  await axios.put(`http://localhost:8080/users/${id}`, {
+    name: editName.value,
+    email: editEmail.value,
+    password: editPassword.value
+  })
+  editingUserId.value = null
+  fetchUsers()
+}
+
+// 刪除使用者（發送 DELETE）
+const deleteUser = async (id) => {
+  await axios.delete(`http://localhost:8080/users/${id}`)
+  fetchUsers()
+}
+
+// 新增貼文的欄位
+const postUserId = ref('')
+const postContent = ref('')
+
+// 取得所有貼文
+const fetchPosts = async () => {
+  try {
+    // 確保每次請求都帶上最新的令牌
+    if (authToken.value) {
+      axios.defaults.headers.common['Authorization'] = `Bearer ${authToken.value}`
+    }
+    
+    const res = await axios.get('http://localhost:8080/posts')
+    posts.value = res.data
+    console.log('獲取貼文成功:', res.data)
+  } catch (error) {
+    console.error('獲取貼文列表失敗', error)
+    if (error.response?.status === 403) {
+      console.log('授權失敗，當前令牌:', authToken.value)
+    }
+  }
+}
+
+// 建立貼文
+const createPost = async () => {
+  await axios.post('http://localhost:8080/posts', {
+    user_id: postUserId.value,
+    content: postContent.value
+  })
+  postUserId.value = ''
+  postContent.value = ''
+  fetchPosts()
+}
+
+// 畫面初始化時一併取得貼文
+onMounted(() => {
+  fetchUsers()
+  fetchPosts()
+})
+</script> 
+
+修改CONTROLLER
+
+package com.example.demo.controller;
+
+import java.util.List;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import com.example.demo.model.User;
+import com.example.demo.repository.UserRepository;
+
+// 移除舊的CORS配置，因為在WebConfig和SecurityConfig中已全局配置
+// @CrossOrigin(origins = "*") 
+@RestController
+@RequestMapping("/users")
+public class UserController {
+    @Autowired
+    private UserRepository userRepository;
+
+    // 新增使用者
+    @PostMapping
+    public User createUser(@RequestBody User user) {
+        return userRepository.save(user);
+    }
+
+    // 查詢所有使用者
+    @GetMapping
+    public List<User> getAllUsers() {
+        List<User> users = userRepository.findAll();
+        // 出於安全考慮，返回前清除密碼
+        users.forEach(user -> user.setPassword(null));
+        return users;
+    }
+
+    // 查詢單一
+    @GetMapping("/{id}")
+    public User getUserById(@PathVariable Long id) {
+        User user = userRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        // 出於安全考慮，返回前清除密碼
+        user.setPassword(null);
+        return user;
+    }
+
+    // 刪除單一
+    @DeleteMapping("/{id}")
+    public void deleteUser(@PathVariable Long id) {
+        userRepository.deleteById(id);
+    }
+
+    // 修改使用者
+    @PutMapping("/{id}")
+    public User updateUser(@PathVariable Long id, @RequestBody User updatedUser) {
+        return userRepository.findById(id).map(user -> {
+            user.setName(updatedUser.getName());
+            user.setEmail(updatedUser.getEmail());
+            if (updatedUser.getPassword() != null && !updatedUser.getPassword().isEmpty()) {
+                user.setPassword(updatedUser.getPassword());
+            }
+            User savedUser = userRepository.save(user);
+            // 出於安全考慮，返回前清除密碼
+            savedUser.setPassword(null);
+            return savedUser;
+        }).orElseThrow(() -> new RuntimeException("User not found"));
+    }
+}
+
+POST修改
+package com.example.demo.controller;
+
+import java.util.List;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import com.example.demo.model.Post;
+import com.example.demo.repository.PostRepository;
+
+// 移除獨立CORS配置，使用全局配置
+// @CrossOrigin(origins = "*")
+@RestController
+@RequestMapping("/posts")
+public class PostController {
+    @Autowired
+    private PostRepository postRepository;
+
+    // 新增貼文
+    @PostMapping
+    public Post createPost(@RequestBody Post post) {
+        return postRepository.save(post);
+    }
+
+    // 查詢所有使用者
+    @GetMapping
+    public List<Post> getAllPosts() {
+        return postRepository.findAll();
+    }
+
+    // 查詢單一
+    @GetMapping("/{id}")
+    public Post getPostById(@PathVariable Long id) {
+        return postRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Post not found"));
+    }
+
+    // 刪除單一
+    @DeleteMapping("/{id}")
+    public void deletePost(@PathVariable Long id) {
+        postRepository.deleteById(id);
+    }
+
+    // 修改使用者
+    @PutMapping("/{id}")
+    public Post updatePost(@PathVariable Long id, @RequestBody Post updatedPost) {
+        return postRepository.findById(id).map(post -> {
+            post.setContent(updatedPost.getContent());
+            return postRepository.save(post);
+        }).orElseThrow(() -> new RuntimeException("Post not found"));
+    }
+}
+
+
+******修改JwtAuthenticationFilter
+
+package com.example.demo.security;
+
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.userdetails.UserDetailsService;
+import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import java.io.IOException;
+import java.util.logging.Logger;
+
+@Component
+public class JwtAuthenticationFilter extends OncePerRequestFilter {
+
+    private static final Logger LOGGER = Logger.getLogger(JwtAuthenticationFilter.class.getName());
+
+    @Autowired
+    private JwtUtil jwtUtil;
+
+    @Autowired
+    private UserDetailsService userDetailsService;
+
+    @Override
+    protected void doFilterInternal(
+            HttpServletRequest request,
+            HttpServletResponse response,
+            FilterChain filterChain) throws ServletException, IOException {
+
+        final String authHeader = request.getHeader("Authorization");
+        final String requestURI = request.getRequestURI();
+
+        LOGGER.info("處理請求: " + requestURI + " 帶授權頭: " + (authHeader != null));
+
+        // 如果請求是/api/auth開頭的或者是OPTIONS請求，則直接放行
+        if (requestURI.startsWith("/api/auth/") || request.getMethod().equals("OPTIONS")) {
+            LOGGER.info("放行認證路徑或OPTIONS請求: " + requestURI);
+            filterChain.doFilter(request, response);
+            return;
+        }
+
+        final String jwt;
+        final String userEmail;
+
+        if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+            LOGGER.warning("授權頭缺失或格式錯誤: " + (authHeader == null ? "null" : authHeader));
+            filterChain.doFilter(request, response);
+            return;
+        }
+
+        jwt = authHeader.substring(7);
+
+        try {
+            userEmail = jwtUtil.extractUsername(jwt);
+
+            LOGGER.info("JWT令牌有效，提取的用戶郵箱: " + userEmail);
+
+            if (userEmail != null && SecurityContextHolder.getContext().getAuthentication() == null) {
+                UserDetails userDetails = this.userDetailsService.loadUserByUsername(userEmail);
+
+                if (jwtUtil.validateToken(jwt, userDetails)) {
+                    LOGGER.info("JWT令牌驗證成功，設置認證上下文");
+
+                    UsernamePasswordAuthenticationToken authToken = new UsernamePasswordAuthenticationToken(
+                            userDetails,
+                            null,
+                            userDetails.getAuthorities());
+                    authToken.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+                    SecurityContextHolder.getContext().setAuthentication(authToken);
+                } else {
+                    LOGGER.warning("JWT令牌無效");
+                }
+            }
+        } catch (Exception e) {
+            LOGGER.severe("處理JWT令牌時發生錯誤: " + e.getMessage());
+        }
+
+        filterChain.doFilter(request, response);
+    }
+}
+
+
+******修改application
+
+
+spring.application.name=bbb
+
+# database配置
+spring.datasource.url=jdbc:sqlserver://localhost:1433;databaseName=bbb;encrypt=false;characterEncoding=UTF-8
+spring.datasource.username=bbb
+spring.datasource.password=bbb
+spring.datasource.driver-class-name=com.microsoft.sqlserver.jdbc.SQLServerDriver
+
+
+# JPA/Hibernate 配置
+spring.jpa.database-platform=org.hibernate.dialect.SQLServerDialect
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+
+# server配置
+server.port=8080
+
+# JWT配置
+jwt.secret=7DwAPKpz9h2wR4fVkRuNnGtWYT7A5LSBq8Xe3vDFGJjsUQZXyYRPLnHMTcVb
+jwt.expiration=86400000
+
+# 日誌配置
+logging.level.org.springframework.security=DEBUG
+logging.level.com.example.demo.security=DEBUG
+
+
+******修改SECUITY
+
+
+package com.example.demo.config;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
+
+import com.example.demo.security.JwtAuthenticationFilter;
+
+import java.util.Arrays;
+import java.util.Collections;
+
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+
+    @Autowired
+    private JwtAuthenticationFilter jwtAuthFilter;
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+                // 啟用CORS支持
+                .cors(cors -> cors.configurationSource(corsConfigurationSource()))
+                // 禁用CSRF保護
+                .csrf(csrf -> csrf.disable())
+                // 配置授權規則
+                .authorizeHttpRequests(auth -> auth
+                        // 允許所有人訪問認證API
+                        .requestMatchers("/api/auth/**").permitAll()
+                        // 臨時允許所有訪問，解決當前問題
+                        .requestMatchers("/users/**", "/posts/**").permitAll()
+                        // 其他所有請求需要認證
+                        .anyRequest().authenticated())
+                // 設置無狀態會話（JWT使用）
+                .sessionManagement(session -> session
+                        .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                // 添加JWT過濾器
+                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+
+        return http.build();
+    }
+
+    @Bean
+    public CorsConfigurationSource corsConfigurationSource() {
+        CorsConfiguration configuration = new CorsConfiguration();
+        configuration.setAllowedOrigins(Collections.singletonList("http://localhost:5173"));
+        configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"));
+        configuration.setAllowedHeaders(Arrays.asList("Authorization", "Content-Type", "X-Requested-With"));
+        configuration.setExposedHeaders(Arrays.asList("Authorization"));
+        configuration.setAllowCredentials(true);
+        configuration.setMaxAge(3600L);
+
+        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+        source.registerCorsConfiguration("/**", configuration);
+        return source;
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+
+    @Bean
+    public AuthenticationManager authenticationManager(AuthenticationConfiguration config) throws Exception {
+        return config.getAuthenticationManager();
+    }
+}
+
+
+******修改前端
+
+
+<template>
+  <div style="padding: 20px">
+    <!-- 註冊與登入區塊 -->
+    <h2 style="margin-top: 30px">用戶註冊</h2>
+    <input v-model="registerName" placeholder="姓名" />
+    <input v-model="registerEmail" placeholder="Email" />
+    <input v-model="registerPassword" placeholder="密碼" />
+    <button @click="register">註冊</button>
+    
+    <h2 style="margin-top: 30px">用戶登入</h2>
+    <input v-model="loginEmail" placeholder="Email" />
+    <input v-model="loginPassword" placeholder="密碼" />
+    <button @click="login">登入</button>
+    
+    <div v-if="authToken" style="margin-top: 15px; padding: 10px; background-color: #f0f0f0; border-radius: 5px;">
+      <p>已登入成功！</p>
+      <p>Token: {{ authToken.substring(0, 20) }}...</p>
+      <button @click="logout">登出</button>
+    </div>
+
+    <h1>使用者清單</h1>
+    <ul>
+      <!-- v-for 迴圈渲染每個使用者 -->
+      <li v-for="user in users" :key="user.id">
+        <!-- 若該使用者正在編輯，顯示輸入框 -->
+        <template v-if="editingUserId === user.id">
+          <input v-model="editName" placeholder="姓名" />
+          <input v-model="editEmail" placeholder="Email" />
+          <input v-model="editPassword" placeholder="密碼" />
+          <button @click="updateUser(user.id)">儲存</button>
+          <button @click="cancelEdit">取消</button>
+        </template>
+        <!-- 否則顯示一般資訊與操作按鈕 -->
+        <template v-else>
+          {{ user.name }} - {{ user.email }}
+          <button @click="startEdit(user)">編輯</button>
+          <button @click="deleteUser(user.id)">刪除</button>
+        </template>
+      </li>
+    </ul>
+
+    <!-- 新增使用者區塊 -->
+    <h2 style="margin-top: 30px">新增使用者</h2>
+    <input v-model="name" placeholder="姓名" />
+    <input v-model="email" placeholder="Email" />
+    <input v-model="password" placeholder="密碼" />
+    <button @click="createUser">送出</button>
+
+    <!-- 新增貼文區塊 -->
+    <h2 style="margin-top: 30px">新增貼文</h2>
+    <input v-model="postUserId" placeholder="使用者 ID" />
+    <input v-model="postContent" placeholder="貼文內容" />
+    <button @click="createPost">送出</button>
+
+    <h2 style="margin-top: 30px">貼文列表</h2>
+    <ul>
+      <li v-for="post in posts" :key="post.post_id">
+        🧑 使用者 ID：{{ post.user_id }}<br />
+        ✏️ 內容：{{ post.content }}<br />
+        🕒 建立時間：{{ new Date(post.createdAt).toLocaleString() }}
+        <hr />
+      </li>
+    </ul>
+
+  </div>
+</template>
+
+<script setup>
+// 引入 Vue 的工具函式與 axios
+import { ref, onMounted } from 'vue'
+import axios from 'axios'
+
+// JWT認證相關
+const registerName = ref('')
+const registerEmail = ref('')
+const registerPassword = ref('')
+const loginEmail = ref('')
+const loginPassword = ref('')
+const authToken = ref('')
+
+// 註冊用戶
+const register = async () => {
+  try {
+    const res = await axios.post('http://localhost:8080/api/auth/register', {
+      name: registerName.value,
+      email: registerEmail.value,
+      password: registerPassword.value
+    })
+    authToken.value = res.data.token
+    
+    // 保存令牌到本地存儲，以便頁面重載後保持登入
+    localStorage.setItem('jwtToken', authToken.value)
+    
+    // 清空輸入欄位
+    registerName.value = ''
+    registerEmail.value = ''
+    registerPassword.value = ''
+    
+    // 設置全局默認授權頭
+    setAuthHeader(authToken.value)
+    console.log('設置的Authorization頭:', `Bearer ${authToken.value}`)
+    
+    // 更新資料
+    fetchUsers()
+    fetchPosts()
+  } catch (error) {
+    alert('註冊失敗：' + (error.response?.data?.error || error.message))
+    console.error('註冊錯誤詳情:', error)
+  }
+}
+
+// 用戶登入
+const login = async () => {
+  try {
+    const res = await axios.post('http://localhost:8080/api/auth/login', {
+      email: loginEmail.value,
+      password: loginPassword.value
+    })
+    authToken.value = res.data.token
+    
+    // 保存令牌到本地存儲
+    localStorage.setItem('jwtToken', authToken.value)
+    
+    // 清空輸入欄位
+    loginEmail.value = ''
+    loginPassword.value = ''
+    
+    // 設置授權頭
+    setAuthHeader(authToken.value)
+    console.log('設置的Authorization頭:', `Bearer ${authToken.value}`)
+    
+    // 更新資料
+    fetchUsers()
+    fetchPosts()
+  } catch (error) {
+    alert('登入失敗：' + (error.response?.data?.error || error.message))
+    console.error('登入錯誤詳情:', error)
+  }
+}
+
+// 登出功能
+const logout = () => {
+  authToken.value = ''
+  // 移除本地存儲中的令牌
+  localStorage.removeItem('jwtToken')
+  // 移除授權頭
+  delete axios.defaults.headers.common['Authorization']
+}
+
+// 輔助函數：設置認證頭
+const setAuthHeader = (token) => {
+  if (token) {
+    axios.defaults.headers.common['Authorization'] = `Bearer ${token}`
+  } else {
+    delete axios.defaults.headers.common['Authorization']
+  }
+}
+
+// 啟動時檢查本地存儲中的令牌
+const checkSavedToken = () => {
+  const savedToken = localStorage.getItem('jwtToken')
+  if (savedToken) {
+    authToken.value = savedToken
+    setAuthHeader(savedToken)
+    console.log('從本地存儲恢復的令牌:', savedToken)
+  }
+}
+
+// 所有使用者清單（陣列）
+const users = ref([])
+
+// 所有貼文（陣列）
+const posts = ref([])
+
+// 新增使用者的輸入欄位
+const name = ref('')
+const email = ref('')
+const password = ref('')
+
+// 新增貼文的欄位
+const user_id = ref('')
+const content = ref('')
+const creatd_at = ref('')
+
+// 編輯狀態與欄位
+const editingUserId = ref(null)
+const editName = ref('')
+const editEmail = ref('')
+const editPassword = ref('')
+
+// 取得所有使用者
+const fetchUsers = async () => {
+  try {
+    console.log('發送獲取用戶請求，授權頭:', axios.defaults.headers.common['Authorization'])
+    
+    // 創建明確帶有授權頭的請求配置
+    const config = {
+      headers: { Authorization: `Bearer ${authToken.value}` }
+    }
+    
+    const res = await axios.get('http://localhost:8080/users', config)
+    users.value = res.data
+    console.log('獲取用戶成功:', res.data)
+  } catch (error) {
+    console.error('獲取使用者列表失敗', error)
+    if (error.response?.status === 403) {
+      console.log('授權失敗，當前令牌:', authToken.value)
+    }
+  }
+}
+
+// 畫面掛載（第一次開啟）時呼叫 fetchUsers
+onMounted(fetchUsers)
+
+// 建立使用者（發送 POST）
+const createUser = async () => {
+  await axios.post('http://localhost:8080/users', {
+    name: name.value,
+    email: email.value,
+    password: password.value
+  })
+  name.value = ''
+  email.value = ''
+  password.value = ''
+  fetchUsers()
+}
+
+// 開始編輯某一筆資料（帶入原本值）
+const startEdit = (user) => {
+  editingUserId.value = user.id
+  editName.value = user.name
+  editEmail.value = user.email
+  editPassword.value = user.password
+}
+
+// 取消編輯（清空暫存與狀態）
+const cancelEdit = () => {
+  editingUserId.value = null
+  editName.value = ''
+  editEmail.value = ''
+  editPassword.value = ''
+}
+
+// 更新使用者（發送 PUT）
+const updateUser = async (id) => {
+  await axios.put(`http://localhost:8080/users/${id}`, {
+    name: editName.value,
+    email: editEmail.value,
+    password: editPassword.value
+  })
+  editingUserId.value = null
+  fetchUsers()
+}
+
+// 刪除使用者（發送 DELETE）
+const deleteUser = async (id) => {
+  await axios.delete(`http://localhost:8080/users/${id}`)
+  fetchUsers()
+}
+
+// 新增貼文的欄位
+const postUserId = ref('')
+const postContent = ref('')
+
+// 取得所有貼文
+const fetchPosts = async () => {
+  try {
+    console.log('發送獲取貼文請求，授權頭:', axios.defaults.headers.common['Authorization'])
+    
+    // 創建明確帶有授權頭的請求配置
+    const config = {
+      headers: { Authorization: `Bearer ${authToken.value}` }
+    }
+    
+    const res = await axios.get('http://localhost:8080/posts', config)
+    posts.value = res.data
+    console.log('獲取貼文成功:', res.data)
+  } catch (error) {
+    console.error('獲取貼文列表失敗', error)
+    if (error.response?.status === 403) {
+      console.log('授權失敗，當前令牌:', authToken.value)
+    }
+  }
+}
+
+// 建立貼文
+const createPost = async () => {
+  await axios.post('http://localhost:8080/posts', {
+    user_id: postUserId.value,
+    content: postContent.value
+  })
+  postUserId.value = ''
+  postContent.value = ''
+  fetchPosts()
+}
+
+// 頁面掛載時
+onMounted(() => {
+  // 檢查保存的令牌
+  checkSavedToken()
+  // 獲取資料
+  fetchUsers()
+  fetchPosts()
+})
+</script> 

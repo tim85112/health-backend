@@ -1,0 +1,316 @@
+▶ 步驟 1：登入 SQL Server
+先用WINDOWS登入進去，locakhost,1433
+安全性，新增帳號密碼，要記得設置使用者對應
+
+▶ 步驟 2：創建 資料庫 / 表
+CREATE DATABASE aaa
+
+CREATE TABLE users (
+    id BIGINT IDENTITY(1,1) PRIMARY KEY,
+    name NVARCHAR(100),
+    email NVARCHAR(100),
+    password NVARCHAR(255)
+);
+
+－－－－－－－－－－
+
+▶ 步驟 3：創建 spring 專案
+進入 Spring Initializr：
+下載套件
+✅ Spring Web
+✅ Spring Data JPA
+✅ SQL Server Driver
+✅ Spring Boot DevTools
+
+▶ 步驟 4：application.properties 設定 資料庫連線 / JPA
+spring.application.name=aaa
+
+# database配置
+spring.datasource.url=jdbc:sqlserver://localhost:1433;databaseName=aaa;encrypt=false;characterEncoding=UTF-8
+spring.datasource.username=aaa
+spring.datasource.password=aaa
+spring.datasource.driver-class-name=com.microsoft.sqlserver.jdbc.SQLServerDriver
+
+# JPA/Hibernate 配置
+spring.jpa.database-platform=org.hibernate.dialect.SQLServerDialect
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+
+
+
+▶ 步驟 5：創建model + controller +repository
+M：
+package com.example.demo.model;
+
+import jakarta.persistence.*;
+
+@Entity
+@Table(name = "users") // 對應你 SQL Server 中的資料表名稱
+public class User {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private String name;
+
+    private String email;
+
+    private String password;
+
+    // Getter / Setter
+    public Long getId() {
+        return id;
+    }
+
+    public void setId(Long id) {
+        this.id = id;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public String getEmail() {
+        return email;
+    }
+
+    public void setEmail(String email) {
+        this.email = email;
+    }
+
+    public String getPassword() {
+        return password;
+    }
+
+    public void setPassword(String password) {
+        this.password = password;
+    }
+}
+
+－－－－－－－－－－－－－－
+
+J：
+
+package com.example.demo.repository;
+import com.example.demo.model.User;
+import scala.collection.immutable.List;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+// 定義 UserRepository 介面，繼承 JpaRepository
+public interface UserRepository extends JpaRepository<User, Long> {
+    // 這裡可以額外加條件查詢，例如 findByEmail()，先不用寫，先做基本 CRUD
+
+    // 額外條件
+    List<User> findByEmail(String email);
+}
+
+
+－－－－－－－－－－－－－－－
+
+
+C：
+package com.example.demo.controller;
+
+import com.example.demo.model.User;
+import com.example.demo.repository.UserRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
+
+@CrossOrigin(origins = "*")
+@RestController
+@RequestMapping("/users")
+public class UserController {
+
+    @Autowired
+    private UserRepository userRepository;
+
+    // 新增使用者
+    @PostMapping
+    public User createUser(@RequestBody User user) {
+        return userRepository.save(user);
+    }
+
+    // 查詢所有使用者
+    @GetMapping
+    public List<User> getAllUsers() {
+        return userRepository.findAll();
+    }
+
+    // 查詢單一
+    @GetMapping("/{id}")
+    public User getUserById(@PathVariable Long id) {
+        return userRepository.findById(id).orElse(null);
+    }
+
+    // 刪除單一使用者
+    @DeleteMapping("/{id}")
+    public void deleteUser(@PathVariable Long id) {
+        userRepository.deleteById(id);
+    }
+
+    // 修改使用者
+
+    @PutMapping("/{id}")
+    public User updateUser(@PathVariable Long id, @RequestBody User updatedUser) {
+        return userRepository.findById(id).map(user -> {
+            user.setName(updatedUser.getName());
+            user.setEmail(updatedUser.getEmail());
+            user.setPassword(updatedUser.getPassword());
+            return userRepository.save(user);
+        }).orElse(null);
+    }
+
+}
+
+
+▶ 步驟 6：postman測試
+１．設置header (key value)：
+Content-Type application/json
+
+２．body(raw + json)：
+{
+  "name": "Ivan",
+  "email": "ivan@test.com",
+  "password": "123456"
+}
+
+
+－－－－－－－－－－－－－
+
+串聯前端
+▶ 步驟 1：安裝 Node.js
+安裝 LTS 版本：
+👉 https://nodejs.org/
+打開命令列
+node -v
+npm -v
+
+
+▶ 步驟 2 ：創建前端專案
+創建資料夾 用VS打開
+用VS 輸入npm create vite@latest my-vue-app
+創建之後npm install 
+npm run dev 
+
+▶ 步驟 3 ：安裝ａｘｉｏｓ
+npm install axios
+
+
+▶ 步驟 4 ： 改APP.VUE
+<template>
+  <div style="padding: 20px">
+    <h1>使用者清單</h1>
+    <ul>
+      <!-- v-for 迴圈渲染每個使用者 -->
+      <li v-for="user in users" :key="user.id">
+        <!-- 若該使用者正在編輯，顯示輸入框 -->
+        <template v-if="editingUserId === user.id">
+          <input v-model="editName" placeholder="姓名" />
+          <input v-model="editEmail" placeholder="Email" />
+          <input v-model="editPassword" placeholder="密碼" />
+          <button @click="updateUser(user.id)">儲存</button>
+          <button @click="cancelEdit">取消</button>
+        </template>
+        <!-- 否則顯示一般資訊與操作按鈕 -->
+        <template v-else>
+          {{ user.name }} - {{ user.email }}
+          <button @click="startEdit(user)">編輯</button>
+          <button @click="deleteUser(user.id)">刪除</button>
+        </template>
+      </li>
+    </ul>
+
+    <!-- 新增使用者區塊 -->
+    <h2 style="margin-top: 30px">新增使用者</h2>
+    <input v-model="name" placeholder="姓名" />
+    <input v-model="email" placeholder="Email" />
+    <input v-model="password" placeholder="密碼" />
+    <button @click="createUser">送出</button>
+  </div>
+</template>
+
+<script setup>
+// 引入 Vue 的工具函式與 axios
+import { ref, onMounted } from 'vue'
+import axios from 'axios'
+
+// 所有使用者清單（陣列）
+const users = ref([])
+
+// 新增使用者的輸入欄位
+const name = ref('')
+const email = ref('')
+const password = ref('')
+
+// 編輯狀態與欄位
+const editingUserId = ref(null)
+const editName = ref('')
+const editEmail = ref('')
+const editPassword = ref('')
+
+// 畫面初始化時呼叫，取得所有使用者
+const fetchUsers = async () => {
+  const res = await axios.get('http://localhost:8080/users') // 向後端發 GET 請求
+  users.value = res.data // 將回傳資料塞入 users，畫面會自動更新
+}
+
+// 畫面掛載（第一次開啟）時呼叫 fetchUsers
+onMounted(fetchUsers)
+
+// 建立使用者（發送 POST）
+const createUser = async () => {
+  await axios.post('http://localhost:8080/users', {
+    name: name.value,
+    email: email.value,
+    password: password.value
+  })
+  // 清空表單
+  name.value = ''
+  email.value = ''
+  password.value = ''
+  fetchUsers() // 重新取得資料
+}
+
+// 開始編輯某一筆資料（帶入原本值）
+const startEdit = (user) => {
+  editingUserId.value = user.id
+  editName.value = user.name
+  editEmail.value = user.email
+  editPassword.value = user.password
+}
+
+// 取消編輯（清空暫存與狀態）
+const cancelEdit = () => {
+  editingUserId.value = null
+  editName.value = ''
+  editEmail.value = ''
+  editPassword.value = ''
+}
+
+// 更新使用者（發送 PUT）
+const updateUser = async (id) => {
+  await axios.put(`http://localhost:8080/users/${id}`, {
+    name: editName.value,
+    email: editEmail.value,
+    password: editPassword.value
+  })
+  editingUserId.value = null
+  fetchUsers()
+}
+
+// 刪除使用者（發送 DELETE）
+const deleteUser = async (id) => {
+  await axios.delete(`http://localhost:8080/users/${id}`)
+  fetchUsers()
+}
+</script>
+
+
+▶ 步驟 5 ： 實測

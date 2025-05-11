@@ -1,0 +1,129 @@
+package com.example.demo.model;
+
+import java.time.LocalDateTime;
+
+import jakarta.persistence.*;
+
+@Entity
+@Table(name = "Post")
+public class Post {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long post_id;
+    private Long user_id;
+    private String content;
+    
+    @Column(name = "created_at", nullable = false)
+    private LocalDateTime createdAt = LocalDateTime.now();
+
+    // getters and setters
+    public Long getPost_id() {
+        return post_id;
+    }
+
+    public void setPost_id(Long post_id) {
+        this.post_id = post_id;
+    }
+
+    public Long getUser_id() {
+        return user_id;
+    }
+
+    public void setUser_id(Long user_id) {
+        this.user_id = user_id;
+    }
+
+    public String getContent() {
+        return content;
+    }
+
+    public void setContent(String content) {
+        this.content = content;
+    }
+
+    public LocalDateTime getCreatedAt() {
+        return createdAt;
+    }
+
+    public void setCreatedAt(LocalDateTime createdAt) {
+        this.createdAt = createdAt;
+    }
+}
+
+--------------------------
+
+package com.example.demo.repository;
+
+import com.example.demo.model.Post;
+
+import org.springframework.data.jpa.repository.JpaRepository;
+
+//定義介面 繼承JPA的Repository
+public interface PostRepository extends JpaRepository<Post, Long> {
+
+}
+
+------------------------------------
+
+package com.example.demo.controller;
+
+import java.util.List;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.CrossOrigin;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import com.example.demo.model.Post;
+import com.example.demo.repository.PostRepository;
+
+@CrossOrigin(origins = "*")
+@RestController
+@RequestMapping("/posts")
+public class PostController {
+    @Autowired
+    private PostRepository postRepository;
+
+    // 新增貼文
+    @PostMapping
+    public Post createPost(@RequestBody Post post) {
+        return postRepository.save(post);
+    }
+
+    // 查詢所有使用者
+    @GetMapping
+    public List<Post> getAllPosts() {
+        return postRepository.findAll();
+    }
+
+    // 查詢單一
+    @GetMapping("/{id}")
+    public Post getPostById(@PathVariable Long id) {
+        return postRepository.findById(id)
+                .orElseThrow(() -> new RuntimeException("Post not found"));
+    }
+
+    // 刪除單一
+    @DeleteMapping("/{id}")
+    public void deletePost(@PathVariable Long id) {
+        postRepository.deleteById(id);
+    }
+
+    // 修改使用者
+    @PutMapping("/{id}")
+    public Post updatePost(@PathVariable Long id, @RequestBody Post updatedPost) {
+        return postRepository.findById(id).map(post -> {
+            post.setContent(updatedPost.getContent());
+            return postRepository.save(post);
+        }).orElseThrow(() -> new RuntimeException("Post not found"));
+
+    }
+
+}
